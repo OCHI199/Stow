@@ -254,12 +254,29 @@ pub fn set_withdraw_cooldown(_env: &Env, _caller: Address, _seconds: u64) -> Res
 ///
 /// Same trust trade-off as `savings-vault::admin::upgrade` (see that
 /// function's doc comment): the admin key can replace contract logic
-/// outright, including custody rules. Storage is not migrated automatically.
+/// outright, including custody rules — so whoever holds it can, in effect,
+/// move every depositor's funds. Deployments that want stronger guarantees
+/// should put the admin behind a multisig and/or timelock. Storage is not
+/// migrated automatically; the new Wasm must read the existing `DataKey`
+/// layout (or ship its own migration entrypoint).
 ///
-/// Must emit `upgraded` via [`events::publish_upgraded`] (payload documented
-/// in `README.md`'s "Event schema") after the Wasm swap succeeds.
-///
-/// TODO(issue): implement.
-pub fn upgrade(_env: &Env, _caller: Address, _new_wasm_hash: BytesN<32>) -> Result<(), Error> {
-    unimplemented!("admin: upgrade")
+/// - Requires `require_auth` from `caller`; errors `Error::Unauthorized`
+///   unless `caller` is the admin, `Error::NotInitialized` before
+///   `initialize`.
+/// - `new_wasm_hash` must already be uploaded to the network (e.g. via the
+///   Stellar CLI or `Deployer::upload_contract_wasm`); the host traps
+///   otherwise and nothing changes.
+/// - The swap takes effect once the current invocation finishes; the
+///   `upgraded` event is emitted via [`events::publish_upgraded`] (payload
+///   documented in `README.md`'s "Event schema") after it succeeds.
+pub fn upgrade(env: &Env, caller: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+    extend_instance_ttl(env);
+    require_admin(env, &caller)?;
+
+    env.deployer()
+        .update_current_contract_wasm(new_wasm_hash.clone());
+
+    events::publish_upgraded(env, &caller, &new_wasm_hash);
+
+    Ok(())
 }

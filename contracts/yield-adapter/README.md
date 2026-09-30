@@ -304,8 +304,11 @@ stellar contract invoke --id $CONTRACT_ID --source admin --network testnet \
 
 #### `upgrade(caller: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error>`
 - **Auth:** current admin (`caller`).
-- **Errors:** `Unauthorized`.
+- **Errors:** `NotInitialized`, `Unauthorized`.
 - **Events:** [`upgraded`](#upgraded).
+- **Trust:** the admin key can replace contract logic outright, including
+  custody rules. Storage is not migrated automatically. `new_wasm_hash` must
+  already be uploaded (`stellar contract upload`).
 ```bash
 stellar contract invoke --id $CONTRACT_ID --source admin --network testnet \
   -- upgrade --caller $ADMIN_ADDRESS --new_wasm_hash <64-char-hex-hash>
