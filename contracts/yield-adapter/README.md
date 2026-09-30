@@ -223,6 +223,11 @@ stellar contract invoke --id $CONTRACT_ID --source admin --network testnet \
 - **Auth:** current admin (`caller`).
 - **Errors:** `NotInitialized`, `Unauthorized`.
 - **Events:** none.
+- **Behavior:** takes effect immediately — `treasury()` returns the new
+  address and every later `withdraw_fees` pays it. Already-accrued fees are
+  **not** swept on change; they go to whichever treasury is configured when
+  `withdraw_fees` next runs. Call `withdraw_fees` first if the outgoing
+  treasury should receive them.
 ```bash
 stellar contract invoke --id $CONTRACT_ID --source admin --network testnet \
   -- set_treasury --caller $ADMIN_ADDRESS --new_treasury $NEW_TREASURY_ADDRESS

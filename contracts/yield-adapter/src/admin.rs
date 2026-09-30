@@ -102,13 +102,25 @@ pub fn set_admin(env: &Env, new_admin: Address) -> Result<(), Error> {
 /// Change the treasury address that receives collected performance fees.
 /// Admin-only.
 ///
-/// - Requires `require_auth` from the current admin.
-/// - Does **not** sweep already-accrued fees to the new treasury — call
-///   `withdraw_fees` beforehand if that matters for the transition.
-///
-/// TODO(issue): implement.
-pub fn set_treasury(_env: &Env, _caller: Address, _new_treasury: Address) -> Result<(), Error> {
-    unimplemented!("admin: set_treasury")
+/// - Requires `require_auth` from `caller`; errors `Error::Unauthorized`
+///   unless `caller` is the admin, `Error::NotInitialized` before
+///   `initialize`.
+/// - Takes effect immediately: `treasury()` returns `new_treasury` and every
+///   subsequent `withdraw_fees` pays it.
+/// - Does **not** sweep already-accrued fees. `FeesAccrued` is left intact
+///   and is paid to whichever treasury is configured at the time
+///   `withdraw_fees` is next called — i.e. the *new* one. If the outgoing
+///   treasury must receive fees accrued under its tenure, call
+///   `withdraw_fees` before rotating.
+pub fn set_treasury(env: &Env, caller: Address, new_treasury: Address) -> Result<(), Error> {
+    extend_instance_ttl(env);
+    require_admin(env, &caller)?;
+
+    env.storage()
+        .instance()
+        .set(&DataKey::Treasury, &new_treasury);
+
+    Ok(())
 }
 
 /// The performance fee, in basis points (0-10_000), charged only on positive
