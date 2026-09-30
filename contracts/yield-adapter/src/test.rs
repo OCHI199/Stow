@@ -375,6 +375,85 @@ fn set_paused_toggles_and_emits_paused_changed_each_call() {
     assert!(!client.is_paused());
 }
 
+#[test]
+fn set_treasury_updates_treasury_immediately() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, treasury, _token) = setup_with_token(&env);
+    let new_treasury = Address::generate(&env);
+    assert_eq!(client.treasury(), treasury);
+
+    client.set_treasury(&admin, &new_treasury);
+    assert_eq!(client.treasury(), new_treasury);
+}
+
+#[test]
+fn set_treasury_rejects_non_admin_caller() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, treasury, _token) = setup_with_token(&env);
+    let outsider = Address::generate(&env);
+
+    // Signed by the outsider, but the outsider is not the admin.
+    assert_eq!(
+        client.try_set_treasury(&outsider, &outsider),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(client.treasury(), treasury);
+}
+
+#[test]
+fn set_treasury_requires_admin_signature() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, treasury, _token) = setup_with_token(&env);
+    let attacker = Address::generate(&env);
+
+    // Nobody signs: passing the admin's address as `caller` is not enough.
+    env.set_auths(&[]);
+    assert!(client.try_set_treasury(&admin, &attacker).is_err());
+    assert_eq!(client.treasury(), treasury);
+}
+
+#[test]
+fn set_treasury_before_initialize_is_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let who = Address::generate(&env);
+    assert_eq!(
+        client.try_set_treasury(&who, &who),
+        Err(Ok(Error::NotInitialized))
+    );
+}
+
+/// Already-accrued fees are not swept on rotation: the next `withdraw_fees`
+/// pays the *new* treasury, and the old one receives nothing.
+#[test]
+fn withdraw_fees_after_set_treasury_pays_new_treasury() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, old_treasury, token) = setup_with_token(&env);
+    let new_treasury = Address::generate(&env);
+
+    // Seed accrued fees (backed by real tokens on the adapter) directly, to
+    // isolate the treasury routing from harvest's own behavior.
+    mint(&env, &token, &client.address, 5_000);
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::FeesAccrued, &5_000i128);
+    });
+
+    client.set_treasury(&admin, &new_treasury);
+    assert_eq!(client.fees_accrued(), 5_000, "rotation must not sweep fees");
+
+    assert_eq!(client.withdraw_fees(&Address::generate(&env)), 5_000);
+    assert_eq!(balance_of(&env, &token, &new_treasury), 5_000);
+    assert_eq!(balance_of(&env, &token, &old_treasury), 0);
+    assert_eq!(client.fees_accrued(), 0);
+}
+
 /// `admin::upgrade` itself is a separate, still-unimplemented issue (it
 /// needs an uploaded Wasm to swap to). This pins the `upgraded` payload the
 /// typed publisher emits, so `upgrade` only has to call it.
