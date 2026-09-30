@@ -454,9 +454,63 @@ fn withdraw_fees_after_set_treasury_pays_new_treasury() {
     assert_eq!(client.fees_accrued(), 0);
 }
 
-/// `admin::upgrade` itself is a separate, still-unimplemented issue (it
-/// needs an uploaded Wasm to swap to). This pins the `upgraded` payload the
-/// typed publisher emits, so `upgrade` only has to call it.
+#[test]
+fn upgrade_rejects_non_admin_caller() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _treasury, _token) = setup_with_token(&env);
+    let outsider = Address::generate(&env);
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+    // Signed by the outsider, but the outsider is not the admin: rejected
+    // with a typed error before the host is ever asked to swap Wasm.
+    assert_eq!(
+        client.try_upgrade(&outsider, &hash),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(adapter_events(&env, &client, TOPIC_UPGRADED).len(), 0);
+}
+
+#[test]
+fn upgrade_requires_admin_signature() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _treasury, _token) = setup_with_token(&env);
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+    env.set_auths(&[]);
+    assert!(client.try_upgrade(&admin, &hash).is_err());
+}
+
+#[test]
+fn upgrade_before_initialize_is_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = setup(&env);
+    let who = Address::generate(&env);
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+    assert_eq!(
+        client.try_upgrade(&who, &hash),
+        Err(Ok(Error::NotInitialized))
+    );
+}
+
+/// A hash that was never uploaded makes the host trap; the call fails as a
+/// whole, so no `upgraded` event is left behind and the admin is unchanged.
+#[test]
+fn upgrade_to_unknown_wasm_hash_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _treasury, _token) = setup_with_token(&env);
+    let hash = BytesN::from_array(&env, &[9u8; 32]);
+
+    assert!(client.try_upgrade(&admin, &hash).is_err());
+    assert_eq!(client.admin(), admin);
+}
+
+/// Pins the `upgraded` payload the typed publisher emits. A full swap test
+/// (`upgrade` succeeding and emitting it) needs a second compiled Wasm
+/// fixture to upload via `env.deployer().upload_contract_wasm`.
 #[test]
 fn upgraded_publisher_emits_documented_payload() {
     let env = Env::default();
