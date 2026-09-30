@@ -24,7 +24,7 @@ use crate::accounting::mul_div_floor;
 use crate::error::Error;
 use crate::events::{
     self, EVENT_SCHEMA_VERSION, TOPIC_ADMIN_SET, TOPIC_DEPOSITED, TOPIC_INIT, TOPIC_PAUSED_CHANGED,
-    TOPIC_STRATEGY_CHANGED, TOPIC_STRATEGY_REGISTERED, TOPIC_UPGRADED, TOPIC_WITHDRAW_CANCELLED,
+    TOPIC_STRATEGY_CHANGED, TOPIC_STRATEGY_DEREGISTERED, TOPIC_STRATEGY_REGISTERED, TOPIC_UPGRADED, TOPIC_WITHDRAW_CANCELLED,
     TOPIC_WITHDRAW_CLAIMED, TOPIC_WITHDRAW_REQUESTED,
 };
 use crate::fees::compute_performance_fee;
@@ -696,19 +696,125 @@ fn deregistered_strategy_cannot_be_activated() {
     env.mock_all_auths();
     let (client, admin, _treasury, token) = setup_with_token(&env);
     let (_, id) = register_mock_strategy(&env, &client, &admin, &token);
-
-    // `deregister_strategy` is a separate issue; mark it deregistered directly.
-    env.as_contract(&client.address, || {
-        let key = DataKey::Strategy(id);
-        let mut info: StrategyInfo = env.storage().persistent().get(&key).unwrap();
-        info.deregistered_at = Some(1);
-        env.storage().persistent().set(&key, &info);
-    });
+    client.deregister_strategy(&admin, &id);
 
     assert_eq!(
         client.try_set_active_strategy(&admin, &id),
         Err(Ok(Error::StrategyNotFound))
     );
+}
+
+#[test]
+fn deregister_inactive_strategy_sets_deregistered_at_and_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(100);
+    let (client, admin, _treasury, token) = setup_with_token(&env);
+    let (strategy, id) = register_mock_strategy(&env, &client, &admin, &token);
+
+    env.ledger().set_timestamp(250);
+    client.deregister_strategy(&admin, &id);
+
+    let (topics, data) = single_event(&env, &client, TOPIC_STRATEGY_DEREGISTERED);
+    let expected_topics: Vec<Val> =
+        (Symbol::new(&env, TOPIC_STRATEGY_DEREGISTERED), id).into_val(&env);
+    assert_eq!(topics, expected_topics);
+    assert_eq!(decode::<(u64, u64)>(&env, &data), (id, 250));
+
+    // The record is kept (history stays readable) with `deregistered_at` set.
+    let expected = StrategyInfo {
+        id,
+        address: strategy.address.clone(),
+        name: String::from_str(&env, "mock"),
+        deposit_cap: 0,
+        registered_at: 100,
+        deregistered_at: Some(250),
+    };
+    assert_eq!(client.get_strategy(&id), expected);
+    assert_eq!(client.list_strategies(), soroban_sdk::vec![&env, expected]);
+}
+
+#[test]
+fn deregister_active_strategy_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _treasury, token) = setup_with_token(&env);
+    let (_, id) = activate_mock_strategy(&env, &client, &admin, &token);
+
+    assert_eq!(
+        client.try_deregister_strategy(&admin, &id),
+        Err(Ok(Error::StrategyActive))
+    );
+    assert_eq!(client.get_strategy(&id).deregistered_at, None);
+    assert_eq!(adapter_events(&env, &client, TOPIC_STRATEGY_DEREGISTERED).len(), 0);
+}
+
+#[test]
+fn deregister_strategy_is_permanent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(10);
+    let (client, admin, _treasury, token) = setup_with_token(&env);
+    let (_, id) = register_mock_strategy(&env, &client, &admin, &token);
+    client.deregister_strategy(&admin, &id);
+
+    // A repeat call is rejected and does not move the original timestamp.
+    env.ledger().set_timestamp(20);
+    assert_eq!(
+        client.try_deregister_strategy(&admin, &id),
+        Err(Ok(Error::StrategyNotFound))
+    );
+    assert_eq!(client.get_strategy(&id).deregistered_at, Some(10));
+
+    // It can never become active again.
+    assert_eq!(
+        client.try_set_active_strategy(&admin, &id),
+        Err(Ok(Error::StrategyNotFound))
+    );
+}
+
+#[test]
+fn deregister_strategy_rejects_unknown_id_non_admin_and_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _treasury, token) = setup_with_token(&env);
+    let (_, id) = register_mock_strategy(&env, &client, &admin, &token);
+    let outsider = Address::generate(&env);
+
+    assert_eq!(
+        client.try_deregister_strategy(&admin, &99),
+        Err(Ok(Error::StrategyNotFound))
+    );
+    assert_eq!(
+        client.try_deregister_strategy(&outsider, &id),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    client.set_paused(&admin, &true);
+    assert_eq!(
+        client.try_deregister_strategy(&admin, &id),
+        Err(Ok(Error::Paused))
+    );
+    assert_eq!(client.get_strategy(&id).deregistered_at, None);
+}
+
+/// The duplicate-address check only considers live registrations, so the
+/// same address can be registered again under a fresh id after
+/// deregistration; the old id stays deregistered.
+#[test]
+fn deregistered_address_can_be_registered_under_new_id() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _treasury, token) = setup_with_token(&env);
+    let (strategy, id) = register_mock_strategy(&env, &client, &admin, &token);
+    client.deregister_strategy(&admin, &id);
+
+    let new_id =
+        client.register_strategy(&admin, &strategy.address, &String::from_str(&env, "again"));
+    assert_ne!(new_id, id);
+    assert!(client.get_strategy(&id).deregistered_at.is_some());
+    assert_eq!(client.get_strategy(&new_id).deregistered_at, None);
+    assert_eq!(client.list_strategies().len(), 2);
 }
 
 // ---------------------------------------------------------------------------
