@@ -295,4 +295,10 @@ pub enum DataKey {
     ///
     /// Durability: instance. TTL: same as `InterestRateBps`.
     InterestFrequency,
+    /// Per-contributor amounts for a shared savings goal.
+    GoalContributions(u64),
+    /// Ledger sequence of the most recent contribution to a goal.
+    GoalLastContributionLedger(u64),
+    /// Set while an external token transfer is in progress.
+    TokenTransferActive,
 }
