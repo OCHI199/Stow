@@ -102,6 +102,34 @@ fn flexible_deposit_withdraw() {
 }
 
 #[test]
+fn flexible_deposit_gas_cost_stays_within_baseline() {
+    const CPU_BASELINE: u64 = 20_000_000;
+    const MEMORY_BASELINE: u64 = 4 * 1024 * 1024;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    mint(&env, &token, &token_admin, &owner, 1_000);
+
+    let mut budget = env.budget();
+    budget.reset_default();
+    client.deposit(&owner, &1_000);
+
+    let cpu_cost = budget.cpu_instruction_cost();
+    let memory_cost = budget.memory_bytes_cost();
+    assert!(
+        cpu_cost <= CPU_BASELINE,
+        "flexible deposit CPU cost {cpu_cost} exceeds baseline {CPU_BASELINE}",
+    );
+    assert!(
+        memory_cost <= MEMORY_BASELINE,
+        "flexible deposit memory cost {memory_cost} exceeds baseline {MEMORY_BASELINE}",
+    );
+}
+
+#[test]
 fn locked_respects_time_lock() {
     let env = Env::default();
     env.mock_all_auths();

@@ -1319,6 +1319,32 @@ fn deposit_forwards_to_active_strategy_with_exact_auth() {
 }
 
 #[test]
+fn deposit_gas_cost_stays_within_baseline() {
+    const CPU_BASELINE: u64 = 20_000_000;
+    const MEMORY_BASELINE: u64 = 4 * 1024 * 1024;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _treasury, token) = setup_with_token(&env);
+    let user = funded_user(&env, &token, 1_000);
+
+    let mut budget = env.budget();
+    budget.reset_default();
+    client.deposit(&user, &1_000);
+
+    let cpu_cost = budget.cpu_instruction_cost();
+    let memory_cost = budget.memory_bytes_cost();
+    assert!(
+        cpu_cost <= CPU_BASELINE,
+        "deposit CPU cost {cpu_cost} exceeds baseline {CPU_BASELINE}",
+    );
+    assert!(
+        memory_cost <= MEMORY_BASELINE,
+        "deposit memory cost {memory_cost} exceeds baseline {MEMORY_BASELINE}",
+    );
+}
+
+#[test]
 fn deposit_rejects_when_active_strategy_cap_exceeded() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1486,6 +1512,46 @@ fn withdraw_round_trip_returns_correct_assets() {
         client.try_claim_withdraw(&user, &request_id),
         Err(Ok(Error::WithdrawAlreadyResolved))
     );
+}
+
+#[test]
+fn strategy_yield_withdrawal_keeps_balances_consistent() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, admin, _treasury, token) = setup_with_token(&env);
+    let strategy_address = setup_crate_mock_strategy(&env);
+    let strategy = crate::mock_strategy::MockStrategyClient::new(&env, &strategy_address);
+    strategy.init(&token);
+    let strategy_id = client.register_strategy(
+        &admin,
+        &strategy_address,
+        &String::from_str(&env, "token-backed"),
+    );
+    client.set_active_strategy(&admin, &strategy_id);
+    client.set_performance_fee_bps(&admin, &1_000);
+
+    let user = funded_user(&env, &token, 1_000);
+    assert_eq!(client.deposit(&user, &1_000), 1_000);
+    assert_eq!(balance_of(&env, &token, &strategy_address), 1_000);
+    assert_eq!(client.total_assets(), 1_000);
+    assert_eq!(client.total_shares(), 1_000);
+
+    strategy.simulate_yield(&client.address, &100);
+    mint(&env, &token, &strategy_address, 100);
+    assert_eq!(client.harvest(&Address::generate(&env)), 100);
+    assert_eq!(client.exchange_rate(), (1_090, 1_000));
+    assert_eq!(client.fees_accrued(), 10);
+
+    let request_id = client.request_withdraw(&user, &1_000);
+    assert_eq!(client.get_withdraw_request(&request_id).assets, 1_090);
+    assert_eq!(client.claim_withdraw(&user, &request_id), 1_090);
+
+    assert_eq!(balance_of(&env, &token, &user), 1_090);
+    assert_eq!(balance_of(&env, &token, &strategy_address), 10);
+    assert_eq!(strategy.balance(&client.address), 10);
+    assert_eq!(client.total_assets(), 0);
+    assert_eq!(client.total_shares(), 0);
+    assert_eq!(client.fees_accrued(), 10);
 }
 
 #[test]
@@ -2719,6 +2785,35 @@ fn check_harvest_interval_rejects_too_soon() {
         assert_eq!(
             crate::harvest::check_harvest_interval(&env),
             Err(Error::HarvestTooSoon),
+        );
+    });
+}
+
+#[test]
+fn check_harvest_interval_handles_past_and_exact_boundary_timestamps() {
+    let env = Env::default();
+    let contract_id = env.register(YieldAdapter, ());
+    let last_harvest: u64 = 10_000;
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::HarvestInterval, &3_600u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::LastHarvestAt, &last_harvest);
+
+        env.ledger().set_timestamp(last_harvest - 1);
+        assert_eq!(
+            crate::harvest::check_harvest_interval(&env),
+            Err(Error::HarvestTooSoon),
+            "a ledger timestamp before the previous harvest must not bypass the interval",
+        );
+
+        env.ledger().set_timestamp(last_harvest + 3_600);
+        assert!(
+            crate::harvest::check_harvest_interval(&env).is_ok(),
+            "harvest must be allowed at the exact interval boundary",
         );
     });
 }
